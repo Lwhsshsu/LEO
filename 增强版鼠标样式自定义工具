@@ -1,0 +1,841 @@
+import os
+import ctypes
+import json
+import tempfile
+from pathlib import Path
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                            QLabel, QPushButton, QListWidget, QFileDialog, QComboBox,
+                            QSlider, QGroupBox, QSplitter, QSizePolicy, QStackedWidget,
+                            QColorDialog, QFrame, QScrollArea, QGridLayout, QSpacerItem,
+                            QSizePolicy, QToolButton, QMenu, QAction, QMessageBox, QCheckBox)
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
+from PyQt5.QtGui import (QCursor, QPixmap, QIcon, QColor, QPainter, QPen, QBrush, 
+                         QFont, QLinearGradient, QConicalGradient, QRadialGradient)
+# Windows API 用于实际更改光标
+if os.name == 'nt':
+    import winreg
+    import ctypes.wintypes
+
+    SPI_SETCURSORS = 0x0057
+    SPIF_UPDATEINIFILE = 0x01
+    SPIF_SENDCHANGE = 0x02
+
+    class SystemCursorManager:
+        def __init__(self):
+            self.cursor_schemes = {}
+            self.load_default_schemes()
+            
+        def load_default_schemes(self):
+            # 获取Windows默认光标方案
+            self.cursor_schemes = {
+                "Windows 默认": {
+                    "Arrow": "Arrow",
+                    "Help": "Help",
+                    "AppStarting": "AppStarting",
+                    "Wait": "Wait",
+                    "Crosshair": "Crosshair",
+                    "IBeam": "IBeam",
+                    "NWPen": "NWPen",
+                    "No": "No",
+                    "SizeAll": "SizeAll",
+                    "SizeNESW": "SizeNESW",
+                    "SizeNS": "SizeNS",
+                    "SizeNWSE": "SizeNWSE",
+                    "SizeWE": "SizeWE",
+                    "UpArrow": "UpArrow",
+                    "Hand": "Hand"
+                }
+            }
+            
+        def set_cursor(self, cursor_name, cursor_file):
+            """设置单个系统光标"""
+            if not os.path.exists(cursor_file):
+                return False
+                
+            # 转换路径为Windows格式
+            cursor_file = os.path.abspath(cursor_file)
+            
+            # 更新注册表
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                    r"Control Panel\Cursors", 
+                                    0, winreg.KEY_WRITE)
+                winreg.SetValueEx(key, cursor_name, 0, winreg.REG_SZ, cursor_file)
+                winreg.CloseKey(key)
+                return True
+            except Exception as e:
+                print(f"注册表更新失败: {e}")
+                return False
+                
+        def apply_cursors(self):
+            """应用所有光标更改"""
+            ctypes.windll.user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 
+                                                     SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)
+            return True
+            
+        def save_scheme(self, scheme_name, cursor_map):
+            """保存光标方案"""
+            self.cursor_schemes[scheme_name] = cursor_map
+            
+        def delete_scheme(self, scheme_name):
+            """删除保存的方案"""
+            if scheme_name in self.cursor_schemes and scheme_name != "Windows 默认":
+                del self.cursor_schemes[scheme_name]
+                return True
+            return False
+                
+        def get_scheme_names(self):
+            """获取所有方案名称"""
+            return list(self.cursor_schemes.keys())
+            
+        def get_scheme(self, scheme_name):
+            """获取特定方案"""
+            return self.cursor_schemes.get(scheme_name, {})
+            
+        def export_scheme(self, scheme_name, file_path):
+            """导出方案到文件"""
+            if scheme_name not in self.cursor_schemes:
+                return False
+                
+            try:
+                with open(file_path, 'w') as f:
+                    json.dump({
+                        "scheme_name": scheme_name,
+                        "cursors": self.cursor_schemes[scheme_name]
+                    }, f, indent=2)
+                return True
+            except Exception as e:
+                print(f"导出失败: {e}")
+                return False
+                
+        def import_scheme(self, file_path):
+            """从文件导入方案"""
+            try:
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+                scheme_name = data["scheme_name"]
+                cursors = data["cursors"]
+                
+                # 确保名称唯一
+                base_name = scheme_name
+                counter = 1
+                while scheme_name in self.cursor_schemes:
+                    scheme_name = f"{base_name}_{counter}"
+                    counter += 1
+                    
+                self.cursor_schemes[scheme_name] = cursors
+                return scheme_name
+            except Exception as e:
+                print(f"导入失败: {e}")
+                return None
+else:
+    class SystemCursorManager:
+        def __init__(self):
+            self.cursor_schemes = {}
+            
+        def set_cursor(self, cursor_name, cursor_file):
+            print(f"模拟设置光标: {cursor_name} -> {cursor_file}")
+            return True
+            
+        def apply_cursors(self):
+            print("应用光标更改")
+            return True
+            
+        # 其他方法类似，返回模拟值...
+
+class CursorPreview(QLabel):
+    """鼠标样式预览区域"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(400, 300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                        stop:0 #1a2a6c, stop:1 #b21f1f);
+            border: 2px solid #444;
+            border-radius: 10px;
+        """)
+        self.cursor_pos = QPoint(200, 150)
+        self.cursor_type = Qt.ArrowCursor
+        self.custom_cursor = None
+        self.cursor_size = 32
+        self.cursor_color = QColor("#3498db")
+        self.cursor_outline = QColor("#2c3e50")
+        self.cursor_name = "Arrow"
+        self.animated = False
+        self.animation_frame = 0
+        self.animation_timer = QTimer(self)
+        self.animation_timer.timeout.connect(self.advance_animation)
+        
+    def set_cursor(self, cursor_type, cursor_name):
+        """设置光标类型"""
+        self.cursor_type = cursor_type
+        self.cursor_name = cursor_name
+        self.custom_cursor = None
+        self.animated = False
+        self.animation_timer.stop()
+        self.update()
+        
+    def set_custom_cursor(self, pixmap, animated=False):
+        """设置自定义光标"""
+        self.custom_cursor = pixmap
+        self.animated = animated
+        self.animation_frame = 0
+        
+        if self.animated:
+            self.animation_timer.start(100)  # 10 FPS
+        else:
+            self.animation_timer.stop()
+            
+        self.update()
+        
+    def advance_animation(self):
+        """推进动画帧"""
+        if self.animated and self.custom_cursor:
+            self.animation_frame = (self.animation_frame + 1) % self.custom_cursor.count()
+            self.update()
+        
+    def set_cursor_size(self, size):
+        """设置光标大小"""
+        self.cursor_size = size
+        self.update()
+        
+    def set_cursor_color(self, color):
+        """设置光标颜色"""
+        self.cursor_color = color
+        self.update()
+        
+    def set_cursor_outline(self, color):
+        """设置光标轮廓颜色"""
+        self.cursor_outline = color
+        self.update()
+        
+    def paintEvent(self, event):
+        """绘制预览区域"""
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        
+        # 绘制网格背景
+        grid_size = 20
+        painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        for x in range(0, self.width(), grid_size):
+            painter.drawLine(x, 0, x, self.height())
+        for y in range(0, self.height(), grid_size):
+            painter.drawLine(0, y, self.width(), y)
+        
+        # 绘制中心参考线
+        w, h = self.width(), self.height()
+        pen = QPen(QColor(255, 255, 255, 150), 1, Qt.DashLine)
+        painter.setPen(pen)
+        painter.drawLine(w//2, 0, w//2, h)
+        painter.drawLine(0, h//2, w, h//2)
+        
+        # 绘制坐标文本
+        painter.setPen(Qt.white)
+        painter.setFont(QFont("Arial", 10))
+        painter.drawText(10, 20, f"光标: {self.cursor_name}")
+        painter.drawText(10, 40, f"位置: X={self.cursor_pos.x()}, Y={self.cursor_pos.y()}")
+        painter.drawText(10, 60, f"大小: {self.cursor_size}px")
+        
+        # 绘制光标
+        if self.custom_cursor:
+            if self.animated:
+                frame = self.custom_cursor.framePixmap(self.animation_frame)
+            else:
+                frame = self.custom_cursor
+                
+            scaled_cursor = frame.scaled(
+                self.cursor_size, self.cursor_size, 
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            painter.drawPixmap(
+                self.cursor_pos.x() - scaled_cursor.width()//2,
+                self.cursor_pos.y() - scaled_cursor.height()//2,
+                scaled_cursor
+            )
+        else:
+            # 绘制内置光标
+            painter.setBrush(QBrush(self.cursor_color))
+            painter.setPen(QPen(self.cursor_outline, 2))
+            
+            size = self.cursor_size
+            x, y = self.cursor_pos.x(), self.cursor_pos.y()
+            
+            # 根据不同光标类型绘制
+            if self.cursor_name == "Arrow":
+                # 箭头
+                points = [
+                    QPoint(x, y - size//2),
+                    QPoint(x - size//2, y + size//3),
+                    QPoint(x - size//6, y + size//6),
+                    QPoint(x - size//6, y + size//2),
+                    QPoint(x + size//6, y + size//2),
+                    QPoint(x + size//6, y + size//6),
+                    QPoint(x + size//2, y + size//3),
+                    QPoint(x, y - size//2)
+                ]
+                painter.drawPolygon(points)
+                
+            elif self.cursor_name == "Hand":
+                # 手形
+                painter.drawEllipse(QPoint(x, y), size//3, size//3)
+                import math
+                for i in range(5):
+                    angle = -60 + i * 15
+                    rad = math.radians(angle)
+                    length = size * (0.9 - i*0.1)
+                    painter.drawLine(
+                        x, y,
+                        int(x + length * (0 if i==0 else 0.7) * math.cos(rad)),
+                        int(y + length * (0 if i==0 else 0.7) * math.sin(rad))
+                    )
+                
+            elif self.cursor_name == "Crosshair":
+                # 十字
+                painter.drawLine(x - size, y, x + size, y)
+                painter.drawLine(x, y - size, x, y + size)
+                painter.drawEllipse(QPoint(x, y), size//4, size//4)
+                
+            elif self.cursor_name == "Wait":
+                # 等待
+                gradient = QConicalGradient(x, y, 0)
+                gradient.setColorAt(0.0, self.cursor_color)
+                gradient.setColorAt(0.5, QColor(255, 255, 255, 100))
+                gradient.setColorAt(1.0, self.cursor_color)
+                painter.setBrush(QBrush(gradient))
+                painter.drawEllipse(QPoint(x, y), size//2, size//2)
+                painter.setBrush(QBrush(self.cursor_outline))
+                painter.drawEllipse(QPoint(x, y), size//4, size//4)
+                
+            elif self.cursor_name == "Text":
+                # I型
+                painter.drawLine(x - size//2, y - size//2, x + size//2, y - size//2)
+                painter.drawLine(x, y - size//2, x, y + size//2)
+                painter.drawLine(x - size//2, y + size//2, x + size//2, y + size//2)
+                
+            elif self.cursor_name == "ResizeVertical":
+                # 垂直调整
+                painter.drawLine(x, y - size, x, y + size)
+                painter.drawPolygon([
+                    QPoint(x - size//3, y - size + size//4),
+                    QPoint(x, y - size),
+                    QPoint(x + size//3, y - size + size//4)
+                ])
+                painter.drawPolygon([
+                    QPoint(x - size//3, y + size - size//4),
+                    QPoint(x, y + size),
+                    QPoint(x + size//3, y + size - size//4)
+                ])
+                
+            elif self.cursor_name == "ResizeHorizontal":
+                # 水平调整
+                painter.drawLine(x - size, y, x + size, y)
+                painter.drawPolygon([
+                    QPoint(x - size + size//4, y - size//3),
+                    QPoint(x - size, y),
+                    QPoint(x - size + size//4, y + size//3)
+                ])
+                painter.drawPolygon([
+                    QPoint(x + size - size//4, y - size//3),
+                    QPoint(x + size, y),
+                    QPoint(x + size - size//4, y + size//3)
+                ])
+                
+            elif self.cursor_name == "ResizeDiagonal1":
+                # 对角线调整1
+                painter.drawLine(x - size, y - size, x + size, y + size)
+                painter.drawPolygon([
+                    QPoint(x - size + size//4, y - size + size//6),
+                    QPoint(x - size, y - size),
+                    QPoint(x - size + size//6, y - size + size//4)
+                ])
+                painter.drawPolygon([
+                    QPoint(x + size - size//4, y + size - size//6),
+                    QPoint(x + size, y + size),
+                    QPoint(x + size - size//6, y + size - size//4)
+                ])
+                
+            elif self.cursor_name == "ResizeDiagonal2":
+                # 对角线调整2
+                painter.drawLine(x - size, y + size, x + size, y - size)
+                painter.drawPolygon([
+                    QPoint(x - size + size//4, y + size - size//6),
+                    QPoint(x - size, y + size),
+                    QPoint(x - size + size//6, y + size - size//4)
+                ])
+                painter.drawPolygon([
+                    QPoint(x + size - size//4, y - size + size//6),
+                    QPoint(x + size, y - size),
+                    QPoint(x + size - size//6, y - size + size//4)
+                ])
+                
+            elif self.cursor_name == "Move":
+                # 移动
+                painter.drawEllipse(QPoint(x, y), size//3, size//3)
+                for i in range(4):
+                    angle = i * 90
+                    rad = 3.14159 * angle / 180
+                    painter.drawLine(
+                        x, y,
+                        int(x + size * 0.7 * math.cos(rad)),
+                        int(y + size * 0.7 * math.sin(rad))
+                    )
+    
+    def mouseMoveEvent(self, event):
+        """鼠标移动事件"""
+        self.cursor_pos = event.pos()
+        self.update()
+        super().mouseMoveEvent(event)
+from PyQt5.QtWidgets import QStyle, QInputDialog
+import sys
+class CursorCustomizer(QMainWindow):
+    """鼠标样式自定义工具主窗口"""
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("高级鼠标样式自定义工具")
+        self.setGeometry(100, 100, 1000, 700)
+        self.setWindowIcon(QIcon(self.style().standardIcon(QStyle.SP_ComputerIcon)))
+        
+        # 初始化光标管理器
+        self.cursor_manager = SystemCursorManager()
+        
+        # 创建主部件
+        main_widget = QWidget()
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # 使用分割器
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # 左侧控制面板
+        control_panel = QWidget()
+        control_layout = QVBoxLayout(control_panel)
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(15)
+        
+        # 方案管理
+        scheme_group = QGroupBox("光标方案管理")
+        scheme_layout = QVBoxLayout(scheme_group)
+        
+        scheme_control_layout = QHBoxLayout()
+        self.scheme_combo = QComboBox()
+        self.scheme_combo.addItems(self.cursor_manager.get_scheme_names())
+        scheme_control_layout.addWidget(self.scheme_combo, 3)
+        
+        self.scheme_menu_btn = QToolButton()
+        self.scheme_menu_btn.setText("⋮")
+        self.scheme_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        scheme_menu = QMenu()
+        self.save_scheme_action = scheme_menu.addAction("保存当前方案")
+        self.save_scheme_action.triggered.connect(self.save_current_scheme)
+        self.export_scheme_action = scheme_menu.addAction("导出方案")
+        self.export_scheme_action.triggered.connect(self.export_scheme)
+        self.import_scheme_action = scheme_menu.addAction("导入方案")
+        self.import_scheme_action.triggered.connect(self.import_scheme)
+        self.delete_scheme_action = scheme_menu.addAction("删除方案")
+        self.delete_scheme_action.triggered.connect(self.delete_scheme)
+        self.scheme_menu_btn.setMenu(scheme_menu)
+        scheme_control_layout.addWidget(self.scheme_menu_btn, 1)
+        
+        scheme_layout.addLayout(scheme_control_layout)
+        control_layout.addWidget(scheme_group)
+        
+        # 光标类型选择
+        cursor_group = QGroupBox("选择光标类型")
+        cursor_layout = QVBoxLayout(cursor_group)
+        
+        self.cursor_list = QListWidget()
+        self.cursor_list.addItems([
+            "Arrow", "Hand", "Crosshair", "Wait", "Text", 
+            "ResizeVertical", "ResizeHorizontal", "ResizeDiagonal1",
+            "ResizeDiagonal2", "Move"
+        ])
+        self.cursor_list.setCurrentRow(0)
+        self.cursor_list.currentItemChanged.connect(self.select_cursor)
+        cursor_layout.addWidget(self.cursor_list)
+        control_layout.addWidget(cursor_group)
+        
+        # 自定义设置
+        custom_group = QGroupBox("自定义设置")
+        custom_layout = QGridLayout(custom_group)
+        
+        # 大小控制
+        custom_layout.addWidget(QLabel("大小:"), 0, 0)
+        self.size_slider = QSlider(Qt.Horizontal)
+        self.size_slider.setRange(16, 96)
+        self.size_slider.setValue(32)
+        self.size_slider.valueChanged.connect(self.update_preview)
+        custom_layout.addWidget(self.size_slider, 0, 1)
+        
+        # 颜色选择
+        custom_layout.addWidget(QLabel("颜色:"), 1, 0)
+        self.color_combo = QComboBox()
+        self.color_combo.addItems(["蓝色", "红色", "绿色", "紫色", "橙色", "青色", "粉色", "黄色"])
+        self.color_combo.currentIndexChanged.connect(self.update_preview)
+        custom_layout.addWidget(self.color_combo, 1, 1)
+        
+        # 轮廓颜色
+        custom_layout.addWidget(QLabel("轮廓:"), 2, 0)
+        self.outline_combo = QComboBox()
+        self.outline_combo.addItems(["黑色", "深灰色", "白色", "深蓝色", "深红色"])
+        self.outline_combo.setCurrentIndex(0)
+        self.outline_combo.currentIndexChanged.connect(self.update_preview)
+        custom_layout.addWidget(self.outline_combo, 2, 1)
+        
+        # 自定义图片
+        self.custom_image_btn = QPushButton("加载自定义图片...")
+        self.custom_image_btn.clicked.connect(self.load_custom_image)
+        custom_layout.addWidget(self.custom_image_btn, 3, 0, 1, 2)
+        
+        # 动画光标选项
+        self.animate_check = QCheckBox("启用光标动画")
+        self.animate_check.setChecked(False)
+        self.animate_check.stateChanged.connect(self.toggle_animation)
+        custom_layout.addWidget(self.animate_check, 4, 0, 1, 2)
+        
+        control_layout.addWidget(custom_group)
+        
+        # 操作按钮
+        btn_layout = QHBoxLayout()
+        self.apply_btn = QPushButton("应用样式")
+        self.apply_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        self.apply_btn.clicked.connect(self.apply_cursor)
+        
+        self.reset_btn = QPushButton("重置默认")
+        self.reset_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        self.reset_btn.clicked.connect(self.reset_cursor)
+        
+        btn_layout.addWidget(self.apply_btn)
+        btn_layout.addWidget(self.reset_btn)
+        control_layout.addLayout(btn_layout)
+        
+        # 添加弹簧使按钮保持在底部
+        control_layout.addStretch(1)
+        
+        # 右侧预览区域
+        self.preview_area = CursorPreview()
+        
+        # 添加到分割器
+        splitter.addWidget(control_panel)
+        splitter.addWidget(self.preview_area)
+        splitter.setSizes([300, 700])
+        
+        main_layout.addWidget(splitter)
+        self.setCentralWidget(main_widget)
+        
+        # 状态栏
+        self.status_bar = self.statusBar()
+        self.status_bar.showMessage("就绪 | 选择光标样式并点击'应用样式'按钮")
+        
+        # 初始化
+        self.select_cursor()
+        
+    def select_cursor(self):
+        """选择光标类型"""
+        cursor_name = self.cursor_list.currentItem().text()
+        cursor_types = {
+            "Arrow": Qt.ArrowCursor,
+            "Hand": Qt.PointingHandCursor,
+            "Crosshair": Qt.CrossCursor,
+            "Wait": Qt.WaitCursor,
+            "Text": Qt.IBeamCursor,
+            "ResizeVertical": Qt.SizeVerCursor,
+            "ResizeHorizontal": Qt.SizeHorCursor,
+            "ResizeDiagonal1": Qt.SizeBDiagCursor,
+            "ResizeDiagonal2": Qt.SizeFDiagCursor,
+            "Move": Qt.SizeAllCursor
+        }
+        self.preview_area.set_cursor(cursor_types[cursor_name], cursor_name)
+        self.status_bar.showMessage(f"已选择: {cursor_name}")
+        
+    def update_preview(self):
+        """更新预览"""
+        color_map = {
+            "蓝色": "#3498db",
+            "红色": "#e74c3c",
+            "绿色": "#2ecc71",
+            "紫色": "#9b59b6",
+            "橙色": "#e67e22",
+            "青色": "#1abc9c",
+            "粉色": "#e84393",
+            "黄色": "#f1c40f"
+        }
+        
+        outline_map = {
+            "黑色": "#2c3e50",
+            "深灰色": "#7f8c8d",
+            "白色": "#ecf0f1",
+            "深蓝色": "#2980b9",
+            "深红色": "#c0392b"
+        }
+        
+        color = color_map.get(self.color_combo.currentText(), "#3498db")
+        outline = outline_map.get(self.outline_combo.currentText(), "#2c3e50")
+        
+        self.preview_area.set_cursor_color(QColor(color))
+        self.preview_area.set_cursor_outline(QColor(outline))
+        self.preview_area.set_cursor_size(self.size_slider.value())
+        
+    def toggle_animation(self, state):
+        """切换动画状态"""
+        if state == Qt.Checked and self.preview_area.custom_cursor:
+            self.preview_area.animated = True
+            self.preview_area.animation_timer.start()
+        else:
+            self.preview_area.animated = False
+            self.preview_area.animation_timer.stop()
+            
+        self.preview_area.update()
+        
+    def load_custom_image(self):
+        """加载自定义图片"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择鼠标指针图片", 
+            "", "图片文件 (*.png *.jpg *.bmp *.cur *.ani)"
+        )
+        
+        if file_path:
+            # 检查是否为动画光标
+            animated = file_path.lower().endswith('.ani')
+            
+            if animated:
+                # 对于动画光标，我们使用QMovie（但这里简化处理）
+                pixmap = QPixmap(file_path)
+                if pixmap.isNull():
+                    self.status_bar.showMessage("错误: 无法加载动画光标")
+                    return
+            else:
+                pixmap = QPixmap(file_path)
+                if pixmap.isNull():
+                    self.status_bar.showMessage("错误: 无法加载图片文件")
+                    return
+                    
+            self.preview_area.set_custom_cursor(pixmap, animated)
+            self.status_bar.showMessage(f"已加载自定义图片: {os.path.basename(file_path)}")
+            self.animate_check.setEnabled(animated)
+            
+    def apply_cursor(self):
+        """应用鼠标样式"""
+        cursor_name = self.cursor_list.currentItem().text()
+        
+        # 在实际应用中，这里会保存光标到临时文件并设置系统光标
+        if self.preview_area.custom_cursor:
+            # 保存自定义光标到临时文件
+            try:
+                temp_dir = Path(tempfile.gettempdir()) / "cursor_customizer"
+                temp_dir.mkdir(exist_ok=True)
+                temp_file = temp_dir / f"{cursor_name}.cur"
+                
+                if self.preview_area.animated:
+                    # 动画光标需要特殊处理（简化）
+                    self.preview_area.custom_cursor.save(str(temp_file))
+                else:
+                    self.preview_area.custom_cursor.save(str(temp_file))
+                    
+                # 设置系统光标
+                if self.cursor_manager.set_cursor(cursor_name, str(temp_file)):
+                    self.status_bar.showMessage(f"已应用自定义 {cursor_name} 光标")
+                else:
+                    self.status_bar.showMessage("应用失败: 请尝试以管理员权限运行")
+            except Exception as e:
+                self.status_bar.showMessage(f"应用失败: {str(e)}")
+        else:
+            # 对于内置样式，我们只模拟应用
+            self.status_bar.showMessage(f"已应用 {cursor_name} 样式 (演示模式)")
+            
+        # 实际应用中需要调用 apply_cursors() 使更改生效
+        # self.cursor_manager.apply_cursors()
+        
+    def reset_cursor(self):
+        """重置为默认样式"""
+        self.cursor_list.setCurrentRow(0)
+        self.size_slider.setValue(32)
+        self.color_combo.setCurrentIndex(0)
+        self.outline_combo.setCurrentIndex(0)
+        self.preview_area.set_custom_cursor(None)
+        self.animate_check.setChecked(False)
+        self.select_cursor()
+        self.status_bar.showMessage("已重置为默认鼠标样式")
+        
+    def save_current_scheme(self):
+        """保存当前方案"""
+        scheme_name, ok = QInputDialog.getText(
+            self, "保存方案", "输入方案名称:", 
+            text=self.scheme_combo.currentText()
+        )
+        
+        if ok and scheme_name:
+            # 在实际应用中，这里会保存所有光标的设置
+            self.cursor_manager.save_scheme(scheme_name, {})
+            self.scheme_combo.addItem(scheme_name)
+            self.scheme_combo.setCurrentText(scheme_name)
+            self.status_bar.showMessage(f"方案 '{scheme_name}' 已保存")
+            
+    def export_scheme(self):
+        """导出方案"""
+        scheme_name = self.scheme_combo.currentText()
+        if not scheme_name:
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出方案", 
+            f"{scheme_name}.curscheme", 
+            "Cursor Scheme (*.curscheme)"
+        )
+        
+        if file_path:
+            if self.cursor_manager.export_scheme(scheme_name, file_path):
+                self.status_bar.showMessage(f"方案 '{scheme_name}' 已导出")
+            else:
+                self.status_bar.showMessage("导出失败")
+                
+    def import_scheme(self):
+        """导入方案"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入方案", 
+            "", "Cursor Scheme (*.curscheme)"
+        )
+        
+        if file_path:
+            scheme_name = self.cursor_manager.import_scheme(file_path)
+            if scheme_name:
+                self.scheme_combo.addItem(scheme_name)
+                self.scheme_combo.setCurrentText(scheme_name)
+                self.status_bar.showMessage(f"方案 '{scheme_name}' 已导入")
+            else:
+                self.status_bar.showMessage("导入失败")
+                
+    def delete_scheme(self):
+        """删除方案"""
+        scheme_name = self.scheme_combo.currentText()
+        if not scheme_name or scheme_name == "Windows 默认":
+            return
+            
+        reply = QMessageBox.question(
+            self, "删除方案", 
+            f"确定要删除方案 '{scheme_name}' 吗？",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            if self.cursor_manager.delete_scheme(scheme_name):
+                self.scheme_combo.removeItem(self.scheme_combo.currentIndex())
+                self.status_bar.showMessage(f"方案 '{scheme_name}' 已删除")
+            else:
+                self.status_bar.showMessage("删除失败")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    
+    # 设置应用样式
+    app.setStyleSheet("""
+        QMainWindow {
+            background-color: #2c3e50;
+        }
+        QGroupBox {
+            font-weight: bold;
+            font-size: 12pt;
+            color: #ecf0f1;
+            border: 2px solid #34495e;
+            border-radius: 8px;
+            margin-top: 1.5ex;
+            padding-top: 15px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top center;
+            padding: 0 10px;
+            background-color: #34495e;
+            border-radius: 4px;
+        }
+        QListWidget {
+            border: 1px solid #34495e;
+            border-radius: 5px;
+            background-color: #34495e;
+            color: #ecf0f1;
+            font-size: 11pt;
+        }
+        QListWidget::item {
+            padding: 8px;
+            border-bottom: 1px solid #3d566e;
+        }
+        QListWidget::item:selected {
+            background-color: #3498db;
+            color: white;
+        }
+        QPushButton {
+            padding: 8px 16px;
+            border-radius: 4px;
+            border: 1px solid #2c3e50;
+            background-color: #34495e;
+            color: #ecf0f1;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #3d566e;
+        }
+        QSlider::groove:horizontal {
+            height: 8px;
+            background: #34495e;
+            border-radius: 4px;
+        }
+        QSlider::handle:horizontal {
+            background: #3498db;
+            border: 1px solid #2980b9;
+            width: 18px;
+            margin: -5px 0;
+            border-radius: 9px;
+        }
+        QComboBox {
+            background-color: #34495e;
+            color: #ecf0f1;
+            border: 1px solid #2c3e50;
+            border-radius: 4px;
+            padding: 5px;
+        }
+        QComboBox::drop-down {
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 20px;
+            border-left: 1px solid #2c3e50;
+        }
+        QLabel {
+            color: #ecf0f1;
+        }
+        QCheckBox {
+            color: #ecf0f1;
+        }
+        QStatusBar {
+            background-color: #34495e;
+            color: #ecf0f1;
+        }
+    """)
+    
+    window = CursorCustomizer()
+    window.show()
+    sys.exit(app.exec_())
